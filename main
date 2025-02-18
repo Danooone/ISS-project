@@ -1,0 +1,196 @@
+# Install the required library for speech feature extraction
+!pip install python_speech_features
+
+# Importing required libraries
+import os  # For file and directory handling
+import re  # For regular expressions
+import glob  # For file pattern matching
+import soundfile as sf  # For audio file reading and writing
+from IPython.display import Audio, display  # For inline audio playback in Jupyter Notebook
+from scipy import signal  # For signal processing operations
+import matplotlib.pyplot as plt  # For plotting
+import numpy as np  # For numerical operations
+from python_speech_features import mfcc  # For extracting MFCC features
+from scipy.spatial.distance import euclidean  # For computing distances
+from scipy.signal import correlate  # For signal correlation analysis
+from sklearn.preprocessing import StandardScaler  # For feature normalization
+
+# Defining user login for personalized file handling
+login = "xzvere00"
+
+# Reference and test labels for classification task
+ref_labels = ['BMW_1_Drive', 'Audi_A3_Drive', 'Fiat_Panda_Drive', 'Peugeot_307_Drive']
+test_labels = ['test_j', 'test_e', 'test_n', 'test_m']
+
+# Function to load audio signals from labeled files
+def get_signals(labels):
+    signals = []  # List to store signals
+    Fs = None  # Sampling frequency (assumes uniform for all signals)
+    for label in labels:
+        filename = os.path.join(login, label + ".wav")  # Construct file path
+        signal_data, Fs = sf.read(filename)  # Read audio file
+        signals.append(signal_data)  # Append signal to list
+    return signals, Fs
+
+# Function to normalize a signal to [-1, 1] range
+def normalize_signal(signal):
+    max_val = np.max(np.abs(signal))  # Find max absolute value
+    if max_val == 0:  # Handle silent signals
+        return signal
+    return signal / max_val  # Normalize
+
+# Function to convert multi-channel (stereo) signals to mono
+def convert_to_mono(signal):
+    if len(signal.shape) == 2:  # Check for multi-channel
+        return np.mean(signal, axis=1)  # Average across channels
+    return signal
+
+# Function to extract extended features: MFCC + spectral features
+def extract_features(sig, sr):
+    # Extract MFCC features
+    mfcc_feat = mfcc(sig, sr, numcep=13, nfft=2048)  # Compute MFCC
+    mfcc_mean = np.mean(mfcc_feat, axis=0)  # Take mean of MFCC coefficients
+
+    # Spectral features using FFT
+    N = len(sig)  # Signal length
+    X = np.fft.rfft(sig)  # Perform FFT
+    mag = np.abs(X)  # Magnitude spectrum
+    power = mag**2  # Power spectrum
+    freqs = np.linspace(0, sr/2, len(mag))  # Frequency bins
+
+    # Initialize spectral metrics
+    power_sum = np.sum(power)
+    if power_sum == 0:  # Handle silence
+        centroid = bandwidth = rolloff_val = flatness = 0
+    else:
+        centroid = np.sum(freqs * power) / power_sum  # Spectral centroid
+        bandwidth = np.sqrt(np.sum((freqs - centroid)**2 * power) / power_sum)  # Spectral bandwidth
+        roll_percent = 0.85  # Energy percentage for roll-off
+        cumulative_power = np.cumsum(power)
+        cutoff = roll_percent * power_sum
+        rolloff_idx = np.searchsorted(cumulative_power, cutoff)  # Roll-off frequency
+        rolloff_val = freqs[min(rolloff_idx, len(freqs)-1)]
+        eps = 1e-10  # Small value to avoid division by zero
+        geom_mean = np.exp(np.mean(np.log(mag + eps)))
+        arith_mean = np.mean(mag + eps)
+        flatness = geom_mean / arith_mean  # Spectral flatness
+
+    # Combine all features into a single vector
+    feature_vector = np.hstack((mfcc_mean, centroid, bandwidth, rolloff_val, flatness))
+    return feature_vector
+
+# Load reference and test signals
+ref_signals, Fs = get_signals(ref_labels)
+test_signals, _ = get_signals(test_labels)
+
+# Convert all signals to mono
+ref_signals = [convert_to_mono(sig) for sig in ref_signals]
+test_signals = [convert_to_mono(sig) for sig in test_signals]
+
+# Normalize all signals
+ref_signals = [normalize_signal(sig) for sig in ref_signals]
+test_signals = [normalize_signal(sig) for sig in test_signals]
+
+# Verify normalization by printing max amplitudes
+print("Max amplitude of normalized reference signals:")
+for i, sig in enumerate(ref_signals):
+    print(f"{ref_labels[i]}: {np.max(np.abs(sig))}")
+
+print("\nMax amplitude of normalized test signals:")
+for i, sig in enumerate(test_signals):
+    print(f"{test_labels[i]}: {np.max(np.abs(sig))}")
+
+# Plot waveforms for reference and test signals
+for i, sig in enumerate(ref_signals):
+    plt.figure(figsize=(10, 2))
+    plt.plot(sig)
+    plt.title(f"Reference Signal: {ref_labels[i]}")
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
+    plt.show()
+
+for i, sig in enumerate(test_signals):
+    plt.figure(figsize=(10, 2))
+    plt.plot(sig)
+    plt.title(f"Test Signal: {test_labels[i]}")
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
+    plt.show()
+
+# Generate spectrograms for visual analysis
+for i, sig in enumerate(ref_signals):
+    f, t_spec, Sxx = signal.spectrogram(sig, Fs)
+    plt.pcolormesh(t_spec, f, 10 * np.log10(Sxx + 1e-10), shading='gouraud')
+    plt.title(f"Spectrogram of {ref_labels[i]}")
+    plt.ylabel('Frequency [Hz]')
+    plt.xlabel('Time [sec]')
+    plt.colorbar()
+    plt.show()
+
+for i, sig in enumerate(test_signals):
+    f, t_spec, Sxx = signal.spectrogram(sig, Fs)
+    plt.pcolormesh(t_spec, f, 10 * np.log10(Sxx + 1e-10), shading='gouraud')
+    plt.title(f"Spectrogram of {test_labels[i]}")
+    plt.ylabel('Frequency [Hz]')
+    plt.xlabel('Time [sec]')
+    plt.colorbar()
+    plt.show()
+
+# Extract extended features for classification
+ref_features = [extract_features(sig, Fs) for sig in ref_signals]
+test_features = [extract_features(sig, Fs) for sig in test_signals]
+
+# Normalize features using standardization
+scaler = StandardScaler()
+all_features = np.vstack([ref_features, test_features])  # Combine all features
+scaler.fit(all_features)
+ref_features_scaled = scaler.transform(ref_features)
+test_features_scaled = scaler.transform(test_features)
+
+# Compute distances between test and reference features
+N_ref = len(ref_features_scaled)
+N_test = len(test_features_scaled)
+distance_matrix = np.zeros((N_test, N_ref))
+for i in range(N_test):
+    for j in range(N_ref):
+        distance = euclidean(test_features_scaled[i], ref_features_scaled[j])
+        distance_matrix[i, j] = distance
+
+# Display distance matrix
+plt.figure(figsize=(8, 6))
+plt.imshow(distance_matrix, interpolation='nearest', cmap='viridis')
+plt.title('Distance Matrix (MFCC + Custom Spectral Features)')
+plt.xlabel('Reference Signals')
+plt.ylabel('Test Signals')
+plt.xticks(range(N_ref), ref_labels, rotation=45)
+plt.yticks(range(N_test), test_labels)
+plt.colorbar()
+plt.show()
+
+# Plot histogram of distances for threshold analysis
+all_distances = distance_matrix.flatten()
+plt.figure(figsize=(8, 6))
+plt.hist(all_distances, bins=20, color='skyblue', edgecolor='black')
+plt.title('Histogram of Distances (Extended Features)')
+plt.xlabel('Distance')
+plt.ylabel('Frequency')
+plt.show()
+
+# Classification based on distance threshold
+threshold = np.median(all_distances)
+print(f"Selected distance threshold: {threshold:.2f}")
+
+assignments = []
+for i in range(N_test):
+    min_dist_index = np.argmin(distance_matrix[i])
+    min_dist = distance_matrix[i][min_dist_index]
+    if min_dist < threshold:
+        assigned_label = ref_labels[min_dist_index]
+    else:
+        assigned_label = "Unknown"
+    assignments.append((test_labels[i], assigned_label, min_dist))
+
+# Print classification results
+print("\nClassification based on extended features (MFCC + custom spectral):")
+for assignment in assignments:
+    print(f"Test Signal {assignment[0]} is assigned to {assignment[1]} with distance {assignment[2]:.2f}")
